@@ -1,0 +1,15 @@
+{
+  "tracked_users": [
+    {
+      "handle": "elonmusk",
+      "display_name": "Elon Musk",
+      "aliases": ["马斯克", "musk", "elon", "elon musk"]
+    }
+  ],
+  "nitter_instances": [
+    "https://nitter.privacydev.net",
+    "https://nitter.poast.org",
+    "https://nitter.1d4.us",
+    "https://nitter.net"
+  ]
+}
