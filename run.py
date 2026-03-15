@@ -35,7 +35,7 @@ def resolve_user(query, config):
     return None
 
 
-def fetch_tweets(handle, hours=12):
+def fetch_tweets(handle, hours=12, include_retweets=False):
     """用 Playwright 注入 cookie，直接从 x.com 抓推文，遇到超时范围自动停止滚动"""
     tweets = []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -66,8 +66,8 @@ def fetch_tweets(handle, hours=12):
 
             for article in articles:
                 try:
-                    # 跳过转推
-                    if article.query_selector("[data-testid='socialContext']"):
+                    # 跳过转推（除非用户要求包含）
+                    if not include_retweets and article.query_selector("[data-testid='socialContext']"):
                         ctx_text = article.query_selector("[data-testid='socialContext']").inner_text()
                         if "转推" in ctx_text or "Retweet" in ctx_text or "retweeted" in ctx_text.lower():
                             continue
@@ -158,6 +158,7 @@ def main():
     parser = argparse.ArgumentParser(description="Twitter digest skill for OpenClaw")
     parser.add_argument("--user", required=True, help="Twitter handle 或别名，如 elonmusk / 马斯克")
     parser.add_argument("--hours", type=int, default=12, help="只看最近几小时的推文，默认12小时")
+    parser.add_argument("--retweets", action="store_true", help="包含转推，默认不含")
     args = parser.parse_args()
 
     if not TWITTER_CT0 or not TWITTER_AUTH_TOKEN:
@@ -177,7 +178,7 @@ def main():
     display_name = user_info["display_name"]
 
     print(f"🔍 抓取 @{handle} 的推文（最近 {args.hours} 小时）...")
-    tweets = fetch_tweets(handle, hours=args.hours)
+    tweets = fetch_tweets(handle, hours=args.hours, include_retweets=args.retweets)
     print(f"📝 共抓到 {len(tweets)} 条（{args.hours}小时内）")
 
     print("🤖 调用 Claude 总结翻译...")
