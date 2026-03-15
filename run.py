@@ -134,27 +134,15 @@ def summarize(tweets, display_name):
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    prompt = f"""以下是 {display_name} 最近在 Twitter/X 上的发言（不含转推）：
+    prompt = f"""以下是 {display_name} 最近在 Twitter/X 上的发言（不含转推），请逐条翻译成中文，保持原意，不要总结。
 
+格式如下，每条之间空一行：
+
+🐦 原文：...
+🇨🇳 翻译：...
+
+推文列表：
 {tweets_text}
-
-请你：
-1. 按话题分类，用简洁中文总结（每类2-3句）
-2. 挑出最值得关注的1-3条，附原文和翻译
-3. 格式适合直接在聊天里阅读，用 emoji 分类
-
-格式参考：
-📅 {display_name} 最新动态
-
-🚀 [话题一]
-...
-
-🏛️ [话题二]
-...
-
-⭐ 重点
-原文："..."
-翻译：...
 """
 
     message = client.messages.create(
