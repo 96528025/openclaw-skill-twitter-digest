@@ -8,6 +8,7 @@ openclaw-skill-twitter-digest
 import os
 import json
 import argparse
+from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
 import anthropic
 
@@ -55,6 +56,11 @@ def fetch_tweets(handle):
         page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(4000)  # 等待推文加载
 
+        # 滚动加载更多推文
+        for _ in range(5):
+            page.keyboard.press("End")
+            page.wait_for_timeout(2000)
+
         # 抓取推文
         articles = page.query_selector_all("article[data-testid='tweet']")
         print(f"  找到 {len(articles)} 条推文")
@@ -82,6 +88,7 @@ def fetch_tweets(handle):
                 tweets.append({
                     "time": tweet_time,
                     "content": content,
+                    "time_raw": tweet_time,
                 })
 
             except Exception:
@@ -139,6 +146,7 @@ def summarize(tweets, display_name):
 def main():
     parser = argparse.ArgumentParser(description="Twitter digest skill for OpenClaw")
     parser.add_argument("--user", required=True, help="Twitter handle 或别名，如 elonmusk / 马斯克")
+    parser.add_argument("--hours", type=int, default=12, help="只看最近几小时的推文，默认12小时")
     args = parser.parse_args()
 
     if not TWITTER_CT0 or not TWITTER_AUTH_TOKEN:
@@ -157,9 +165,21 @@ def main():
     handle = user_info["handle"]
     display_name = user_info["display_name"]
 
-    print(f"🔍 抓取 @{handle} 的推文...")
+    print(f"🔍 抓取 @{handle} 的推文（最近 {args.hours} 小时）...")
     tweets = fetch_tweets(handle)
-    print(f"📝 共抓到 {len(tweets)} 条原创推文")
+
+    # 按时间过滤
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=args.hours)
+    filtered = []
+    for t in tweets:
+        try:
+            tweet_dt = datetime.fromisoformat(t["time_raw"].replace("Z", "+00:00"))
+            if tweet_dt >= cutoff:
+                filtered.append(t)
+        except Exception:
+            filtered.append(t)  # 时间解析失败就保留
+    tweets = filtered
+    print(f"📝 共抓到 {len(tweets)} 条（{args.hours}小时内）")
 
     print("🤖 调用 Claude 总结翻译...")
     result = summarize(tweets, display_name)
