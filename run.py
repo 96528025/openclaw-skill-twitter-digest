@@ -6,16 +6,14 @@ openclaw-skill-twitter-digest
 """
 
 import os
-import sys
 import json
 import argparse
-import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import anthropic
 
-# ===== 填写你的 API Key =====
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "YOUR_API_KEY_HERE")
-# ============================
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+TWITTER_CT0       = os.environ.get("TWITTER_CT0")
+TWITTER_AUTH_TOKEN = os.environ.get("TWITTER_AUTH_TOKEN")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
@@ -27,10 +25,6 @@ def load_config():
 
 
 def resolve_user(query, config):
-    """
-    把用户的自然语言（"马斯克"、"musk"）映射到 Twitter handle。
-    直接传 handle 也可以（如 "elonmusk"）。
-    """
     query = query.lower().strip()
     for user in config["tracked_users"]:
         if query == user["handle"].lower():
@@ -40,59 +34,68 @@ def resolve_user(query, config):
     return None
 
 
-def fetch_tweets(handle, nitter_instances):
-    """从 Nitter 抓取指定用户的最新原创推文"""
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+def fetch_tweets(handle):
+    """用 Playwright 注入 cookie，直接从 x.com 抓推文"""
+    tweets = []
 
-    for instance in nitter_instances:
-        try:
-            url = f"{instance}/{handle}"
-            resp = requests.get(url, headers=headers, timeout=15)
-            if resp.status_code != 200:
-                continue
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        )
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            tweets = []
+        # 注入登录 cookie
+        context.add_cookies([
+            {"name": "ct0",        "value": TWITTER_CT0,        "domain": ".x.com", "path": "/"},
+            {"name": "auth_token", "value": TWITTER_AUTH_TOKEN, "domain": ".x.com", "path": "/"},
+        ])
 
-            for item in soup.select(".timeline-item"):
+        page = context.new_page()
+        print(f"  正在打开 x.com/{handle} ...")
+        page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(4000)  # 等待推文加载
+
+        # 抓取推文
+        articles = page.query_selector_all("article[data-testid='tweet']")
+        print(f"  找到 {len(articles)} 条推文")
+
+        for article in articles[:20]:
+            try:
                 # 跳过转推
-                if item.select_one(".retweet-header"):
-                    continue
+                if article.query_selector("[data-testid='socialContext']"):
+                    text = article.query_selector("[data-testid='socialContext']").inner_text()
+                    if "转推" in text or "Retweet" in text or "retweeted" in text.lower():
+                        continue
 
-                time_elem = item.select_one(".tweet-date a")
-                if not time_elem:
+                # 正文
+                content_el = article.query_selector("[data-testid='tweetText']")
+                if not content_el:
                     continue
-                tweet_time = time_elem.get("title", "")
-
-                content_elem = item.select_one(".tweet-content")
-                if not content_elem:
-                    continue
-                content = content_elem.get_text(strip=True)
+                content = content_el.inner_text().strip()
                 if not content:
                     continue
 
-                href = time_elem.get("href", "")
-                link = f"https://twitter.com{href}" if href else ""
+                # 时间
+                time_el = article.query_selector("time")
+                tweet_time = time_el.get_attribute("datetime") if time_el else ""
 
                 tweets.append({
                     "time": tweet_time,
                     "content": content,
-                    "link": link,
                 })
 
-            if tweets:
-                return tweets, instance
+            except Exception:
+                continue
 
-        except Exception:
-            continue
+        browser.close()
 
-    return [], None
+    return tweets
 
 
 def summarize(tweets, display_name):
     """调用 Claude Haiku 总结并翻译"""
     if not tweets:
-        return f"⚠️ 抓取失败，所有 Nitter 镜像均无响应。请稍后再试。"
+        return "⚠️ 没有抓到推文，可能是登录 cookie 失效了，请更新 TWITTER_CT0 和 TWITTER_AUTH_TOKEN。"
 
     tweets_text = "\n\n".join([
         f"[{t['time']}]\n{t['content']}"
@@ -101,7 +104,7 @@ def summarize(tweets, display_name):
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    prompt = f"""以下是 {display_name} 最近在 Twitter/X 上的发言（按时间倒序，不含转推）：
+    prompt = f"""以下是 {display_name} 最近在 Twitter/X 上的发言（不含转推）：
 
 {tweets_text}
 
@@ -138,12 +141,14 @@ def main():
     parser.add_argument("--user", required=True, help="Twitter handle 或别名，如 elonmusk / 马斯克")
     args = parser.parse_args()
 
+    if not TWITTER_CT0 or not TWITTER_AUTH_TOKEN:
+        print("⚠️ 请设置环境变量 TWITTER_CT0 和 TWITTER_AUTH_TOKEN")
+        return
+
     config = load_config()
 
-    # 解析用户
     user_info = resolve_user(args.user, config)
     if not user_info:
-        # 如果不在追踪列表里，直接用传入的值当 handle
         user_info = {
             "handle": args.user,
             "display_name": f"@{args.user}",
@@ -152,10 +157,11 @@ def main():
     handle = user_info["handle"]
     display_name = user_info["display_name"]
 
-    # 抓取
-    tweets, source = fetch_tweets(handle, config["nitter_instances"])
+    print(f"🔍 抓取 @{handle} 的推文...")
+    tweets = fetch_tweets(handle)
+    print(f"📝 共抓到 {len(tweets)} 条原创推文")
 
-    # 总结
+    print("🤖 调用 Claude 总结翻译...")
     result = summarize(tweets, display_name)
     print(result)
 
