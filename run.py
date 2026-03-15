@@ -35,9 +35,10 @@ def resolve_user(query, config):
     return None
 
 
-def fetch_tweets(handle):
-    """用 Playwright 注入 cookie，直接从 x.com 抓推文"""
+def fetch_tweets(handle, hours=12):
+    """用 Playwright 注入 cookie，直接从 x.com 抓推文，遇到超时范围自动停止滚动"""
     tweets = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -54,45 +55,67 @@ def fetch_tweets(handle):
         page = context.new_page()
         print(f"  正在打开 x.com/{handle} ...")
         page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(4000)  # 等待推文加载
+        page.wait_for_timeout(4000)
 
-        # 滚动加载更多推文
-        for _ in range(5):
-            page.keyboard.press("End")
-            page.wait_for_timeout(2000)
+        seen_ids = set()
 
-        # 抓取推文
-        articles = page.query_selector_all("article[data-testid='tweet']")
-        print(f"  找到 {len(articles)} 条推文")
+        # 滚动循环：遇到超出时间范围的推文就停
+        for scroll_round in range(20):  # 最多滚20次防止死循环
+            articles = page.query_selector_all("article[data-testid='tweet']")
+            reached_cutoff = False
 
-        for article in articles[:20]:
-            try:
-                # 跳过转推
-                if article.query_selector("[data-testid='socialContext']"):
-                    text = article.query_selector("[data-testid='socialContext']").inner_text()
-                    if "转推" in text or "Retweet" in text or "retweeted" in text.lower():
+            for article in articles:
+                try:
+                    # 跳过转推
+                    if article.query_selector("[data-testid='socialContext']"):
+                        ctx_text = article.query_selector("[data-testid='socialContext']").inner_text()
+                        if "转推" in ctx_text or "Retweet" in ctx_text or "retweeted" in ctx_text.lower():
+                            continue
+
+                    # 时间
+                    time_el = article.query_selector("time")
+                    if not time_el:
+                        continue
+                    tweet_time = time_el.get_attribute("datetime") or ""
+
+                    # 检查是否超出时间范围
+                    try:
+                        tweet_dt = datetime.fromisoformat(tweet_time.replace("Z", "+00:00"))
+                        if tweet_dt < cutoff:
+                            reached_cutoff = True
+                            continue
+                    except Exception:
+                        pass
+
+                    # 去重
+                    if tweet_time in seen_ids:
+                        continue
+                    seen_ids.add(tweet_time)
+
+                    # 正文
+                    content_el = article.query_selector("[data-testid='tweetText']")
+                    if not content_el:
+                        continue
+                    content = content_el.inner_text().strip()
+                    if not content:
                         continue
 
-                # 正文
-                content_el = article.query_selector("[data-testid='tweetText']")
-                if not content_el:
+                    tweets.append({
+                        "time": tweet_time,
+                        "content": content,
+                        "time_raw": tweet_time,
+                    })
+
+                except Exception:
                     continue
-                content = content_el.inner_text().strip()
-                if not content:
-                    continue
 
-                # 时间
-                time_el = article.query_selector("time")
-                tweet_time = time_el.get_attribute("datetime") if time_el else ""
+            if reached_cutoff:
+                print(f"  已到达 {hours} 小时边界，停止滚动（共滚了 {scroll_round + 1} 次）")
+                break
 
-                tweets.append({
-                    "time": tweet_time,
-                    "content": content,
-                    "time_raw": tweet_time,
-                })
-
-            except Exception:
-                continue
+            # 继续往下滚
+            page.keyboard.press("End")
+            page.wait_for_timeout(2000)
 
         browser.close()
 
@@ -166,19 +189,7 @@ def main():
     display_name = user_info["display_name"]
 
     print(f"🔍 抓取 @{handle} 的推文（最近 {args.hours} 小时）...")
-    tweets = fetch_tweets(handle)
-
-    # 按时间过滤
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=args.hours)
-    filtered = []
-    for t in tweets:
-        try:
-            tweet_dt = datetime.fromisoformat(t["time_raw"].replace("Z", "+00:00"))
-            if tweet_dt >= cutoff:
-                filtered.append(t)
-        except Exception:
-            filtered.append(t)  # 时间解析失败就保留
-    tweets = filtered
+    tweets = fetch_tweets(handle, hours=args.hours)
     print(f"📝 共抓到 {len(tweets)} 条（{args.hours}小时内）")
 
     print("🤖 调用 Claude 总结翻译...")
